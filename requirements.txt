@@ -1,0 +1,10 @@
+mysql-connector-python
+pandas
+numpy
+pybaseball
+xgboost
+python-dateutil
+pytz
+requests
+tqdm
+scikit-learn
