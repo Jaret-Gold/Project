@@ -111,11 +111,10 @@ xba_df.loc[predict_mask, 'xBA'] = model_xba.predict_proba(
 xba_df.loc[xba_df['events'].isin(['strikeout', 'strikeout_double_play']), 'xBA'] = 0.0
 xba_df = xba_df[xba_df['xBA'].notnull()]
 
-# 6️⃣ Create xBA Table
-print("Creating output table...")
-cursor.execute("DROP TABLE IF EXISTS statcast_2025")
+# 6️⃣ Create xBA Table (if not exists) with UNIQUE key
+print("Creating output table (if not exists)...")
 cursor.execute("""
-CREATE TABLE statcast_2025 (
+CREATE TABLE IF NOT EXISTS statcast_2025 (
     id INT AUTO_INCREMENT PRIMARY KEY,
     unique_game_id VARCHAR(50),
     events VARCHAR(255),
@@ -131,11 +130,11 @@ CREATE TABLE statcast_2025 (
     pitcher_id BIGINT,
     park_hit_rate FLOAT,
     xBA FLOAT,
-    AB_id VARCHAR(255)
+    AB_id VARCHAR(255) UNIQUE
 )
 """)
 
-# 7️⃣ Upload xBA
+# 7️⃣ Upload xBA with upsert
 print("Uploading xBA data...")
 data_xba = [
     tuple(None if pd.isna(x) else int(x) if isinstance(x, (np.integer, np.int64)) else x
@@ -151,6 +150,20 @@ for i in tqdm(range(0, len(data_xba), 5000), desc="Uploading xBA"):
             game_date, team_batting, team_pitching, gameid, gamepk,
             player_id, pitcher_id, park_hit_rate, xBA, AB_id
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            events = VALUES(events),
+            hit_distance_sc = VALUES(hit_distance_sc),
+            launch_speed = VALUES(launch_speed),
+            launch_angle = VALUES(launch_angle),
+            game_date = VALUES(game_date),
+            team_batting = VALUES(team_batting),
+            team_pitching = VALUES(team_pitching),
+            gameid = VALUES(gameid),
+            gamepk = VALUES(gamepk),
+            player_id = VALUES(player_id),
+            pitcher_id = VALUES(pitcher_id),
+            park_hit_rate = VALUES(park_hit_rate),
+            xBA = VALUES(xBA)
     """, data_xba[i:i+5000])
     conn.commit()
 
@@ -158,10 +171,6 @@ for i in tqdm(range(0, len(data_xba), 5000), desc="Uploading xBA"):
 # MODULE 2: xRuns
 # ==========================================
 print("\n--- Starting xRuns Module ---")
-
-# -----------------------------
-# Load training data
-# -----------------------------
 train_df_xruns = pd.read_sql("""
     SELECT hit_distance_sc, launch_angle, launch_speed,
            outs_when_up, runners_on_base, runs_scored, venue_id
@@ -173,38 +182,20 @@ train_df_xruns = pd.read_sql("""
 
 train_df_xruns['runners_on_base'] = train_df_xruns['runners_on_base'].astype(int)
 
-# -----------------------------
-# Park factors
-# -----------------------------
-park_factors = pd.read_sql("""
-    SELECT venue_id, park_run_factor
-    FROM venue_xruns_factor
-""", conn)
-
-train_df_xruns = train_df_xruns.merge(
-    park_factors, on='venue_id', how='left'
-)
-
+park_factors = pd.read_sql("SELECT venue_id, park_run_factor FROM venue_xruns_factor", conn)
+train_df_xruns = train_df_xruns.merge(park_factors, on='venue_id', how='left')
 league_avg = park_factors['park_run_factor'].mean()
-train_df_xruns['park_run_factor'] = (
-    train_df_xruns['park_run_factor'].fillna(league_avg)
-)
+train_df_xruns['park_run_factor'] = train_df_xruns['park_run_factor'].fillna(league_avg)
 
-# -----------------------------
-# Features
-# -----------------------------
 features_xruns = [
     'hit_distance_sc',
     'launch_angle',
     'launch_speed',
     'outs_when_up',
-    'runners_on_base',   # binary encoded
+    'runners_on_base',
     'park_run_factor'
 ]
 
-# -----------------------------
-# Train model
-# -----------------------------
 model_xruns = XGBRegressor(
     n_estimators=300,
     max_depth=5,
@@ -214,122 +205,37 @@ model_xruns = XGBRegressor(
     objective='reg:squarederror',
     random_state=42
 )
+model_xruns.fit(train_df_xruns[features_xruns], train_df_xruns['runs_scored'])
 
-model_xruns.fit(
-    train_df_xruns[features_xruns],
-    train_df_xruns['runs_scored']
-)
+xruns_df = raw_df[~raw_df['game_type'].isin(['E', 'S'])].copy()
+xruns_df = xruns_df.dropna(subset=['hit_distance_sc', 'launch_angle', 'launch_speed', 'outs_when_up', 'events'])
 
-# -----------------------------
-# Prepare inference data
-# -----------------------------
-xruns_df = raw_df[
-    ~raw_df['game_type'].isin(['E', 'S'])
-].copy()
-
-xruns_df = xruns_df.dropna(subset=[
-    'hit_distance_sc',
-    'launch_angle',
-    'launch_speed',
-    'outs_when_up',
-    'events'
-])
-
-# -----------------------------
-# Binary base-state encoding (MATCH TRAINING)
-# -----------------------------
 xruns_df['runners_on_base'] = (
     pd.notna(xruns_df['on_1b']).astype(int).astype(str) +
     pd.notna(xruns_df['on_2b']).astype(int).astype(str) +
     pd.notna(xruns_df['on_3b']).astype(int).astype(str)
 ).astype(int)
 
-# -----------------------------
-# Actual runs
-# -----------------------------
-xruns_df['runs_scored'] = (
-    xruns_df['post_bat_score'] - xruns_df['bat_score']
-).fillna(0)
+xruns_df['runs_scored'] = (xruns_df['post_bat_score'] - xruns_df['bat_score']).fillna(0)
 
-# -----------------------------
-# Team context
-# -----------------------------
-xruns_df['team_batting'] = np.where(
-    xruns_df['inning_topbot'] == 'Top',
-    xruns_df['away_team'],
-    xruns_df['home_team']
-)
+xruns_df['team_batting'] = np.where(xruns_df['inning_topbot'] == 'Top', xruns_df['away_team'], xruns_df['home_team'])
+xruns_df['team_pitching'] = np.where(xruns_df['inning_topbot'] == 'Top', xruns_df['home_team'], xruns_df['away_team'])
 
-xruns_df['team_pitching'] = np.where(
-    xruns_df['inning_topbot'] == 'Top',
-    xruns_df['home_team'],
-    xruns_df['away_team']
-)
+xruns_df['AB_id'] = xruns_df['game_pk'].astype(str) + "_" + xruns_df['at_bat_number'].astype(str) + "_" + xruns_df['pitch_number'].astype(str)
+xruns_df['unique_game_id'] = xruns_df['game_pk'].astype(str) + "_" + xruns_df['game_date'].astype(str)
+xruns_df['game_id'] = xruns_df['game_date'].astype(str) + "_" + xruns_df['home_team'] + "_" + xruns_df['away_team']
 
-# -----------------------------
-# IDs
-# -----------------------------
-xruns_df['AB_id'] = (
-    xruns_df['game_pk'].astype(str) + "_" +
-    xruns_df['at_bat_number'].astype(str) + "_" +
-    xruns_df['pitch_number'].astype(str)
-)
+xruns_df = xruns_df.merge(pd.read_sql("SELECT DISTINCT game_pk, venue_id FROM statcast_data", conn), on='game_pk', how='left')
+xruns_df = xruns_df.merge(park_factors, on='venue_id', how='left')
+xruns_df['park_run_factor'] = xruns_df['park_run_factor'].fillna(league_avg)
 
-xruns_df['unique_game_id'] = (
-    xruns_df['game_pk'].astype(str) + "_" +
-    xruns_df['game_date'].astype(str)
-)
-
-xruns_df['game_id'] = (
-    xruns_df['game_date'].astype(str) + "_" +
-    xruns_df['home_team'] + "_" +
-    xruns_df['away_team']
-)
-
-# -----------------------------
-# Venue + park factor
-# -----------------------------
-venue_lookup = pd.read_sql("""
-    SELECT DISTINCT game_pk, venue_id
-    FROM statcast_data
-""", conn)
-
-xruns_df = xruns_df.merge(
-    venue_lookup, on='game_pk', how='left'
-)
-
-xruns_df = xruns_df.merge(
-    park_factors, on='venue_id', how='left'
-)
-
-xruns_df['park_run_factor'] = (
-    xruns_df['park_run_factor'].fillna(league_avg)
-)
-
-# -----------------------------
-# Predict xRuns
-# -----------------------------
-xruns_df['expected_runs_raw'] = model_xruns.predict(
-    xruns_df[features_xruns]
-).clip(0, 3.99)
-
-# -----------------------------
-# 🔥 CALIBRATION (KEY FIX)
-# -----------------------------
-
-league_actual = xruns_df['runs_scored'].mean()
-league_expected = xruns_df['expected_runs_raw'].mean()
-
-scale = league_actual / league_expected
-
+xruns_df['expected_runs_raw'] = model_xruns.predict(xruns_df[features_xruns]).clip(0, 3.99)
+scale = xruns_df['runs_scored'].mean() / xruns_df['expected_runs_raw'].mean()
 xruns_df['expected_runs'] = xruns_df['expected_runs_raw'] * scale
 
-# -----------------------------
-# Save table
-# -----------------------------
-cursor.execute("DROP TABLE IF EXISTS expected_runs_2025")
+# Create table if not exists with UNIQUE key
 cursor.execute("""
-CREATE TABLE expected_runs_2025 (
+CREATE TABLE IF NOT EXISTS expected_runs_2025 (
     unique_game_id VARCHAR(50),
     game_pk INT,
     game_id VARCHAR(50),
@@ -357,22 +263,13 @@ CREATE TABLE expected_runs_2025 (
 """)
 
 data_xruns = [
-    tuple(
-        None if pd.isna(x)
-        else int(x) if isinstance(x, (np.integer, np.int64))
-        else x
-        for x in row
-    )
+    tuple(None if pd.isna(x) else int(x) if isinstance(x, (np.integer, np.int64)) else x
+          for x in row)
     for row in xruns_df[
-        [
-            'unique_game_id', 'game_pk', 'game_id', 'game_date',
-            'home_team', 'away_team', 'inning_topbot',
-            'team_batting', 'team_pitching', 'batter', 'pitcher',
-            'hit_distance_sc', 'launch_angle', 'launch_speed',
-            'outs_when_up', 'runners_on_base', 'runs_scored',
-            'expected_runs', 'events', 'description',
-            'AB_id', 'inning', 'park_run_factor'
-        ]
+        ['unique_game_id','game_pk','game_id','game_date','home_team','away_team','inning_topbot',
+         'team_batting','team_pitching','batter','pitcher','hit_distance_sc','launch_angle','launch_speed',
+         'outs_when_up','runners_on_base','runs_scored','expected_runs','events','description',
+         'AB_id','inning','park_run_factor']
     ].itertuples(index=False, name=None)
 ]
 
@@ -389,9 +286,30 @@ for i in tqdm(range(0, len(data_xruns), 5000), desc="Uploading xRuns"):
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
                   %s, %s, %s, %s, %s, %s, %s,
                   %s, %s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            game_pk = VALUES(game_pk),
+            game_id = VALUES(game_id),
+            game_date = VALUES(game_date),
+            home_team = VALUES(home_team),
+            away_team = VALUES(away_team),
+            inning_topbot = VALUES(inning_topbot),
+            team_batting = VALUES(team_batting),
+            team_pitching = VALUES(team_pitching),
+            batter = VALUES(batter),
+            pitcher = VALUES(pitcher),
+            hit_distance_sc = VALUES(hit_distance_sc),
+            launch_angle = VALUES(launch_angle),
+            launch_speed = VALUES(launch_speed),
+            outs_when_up = VALUES(outs_when_up),
+            runners_on_base = VALUES(runners_on_base),
+            runs_scored = VALUES(runs_scored),
+            expected_runs = VALUES(expected_runs),
+            events = VALUES(events),
+            description = VALUES(description),
+            inning = VALUES(inning),
+            park_run_factor = VALUES(park_run_factor)
     """, data_xruns[i:i+5000])
     conn.commit()
-
 
 # ==========================================
 # MODULE 3: Game Score
@@ -507,9 +425,8 @@ if __name__ == "__main__":
 # ==========================================
 # MODULE 4: Player Names
 # ==========================================
+
 print("\n--- Starting Player Name Module ---")
-conn = get_db_conn()
-cursor = conn.cursor()
 cursor.execute("SELECT DISTINCT batter FROM expected_runs_2025 UNION SELECT DISTINCT pitcher FROM expected_runs_2025")
 all_ids = [r[0] for r in cursor.fetchall() if r[0] is not None]
 
@@ -525,9 +442,19 @@ player_lookup = player_register[player_register['key_mlbam'].isin(all_ids)].copy
 player_lookup['full_name'] = player_lookup['name_first'] + ' ' + player_lookup['name_last']
 data_names = player_lookup[['key_mlbam', 'full_name']].drop_duplicates().values.tolist()
 
-cursor.execute("DROP TABLE IF EXISTS player_names")
-cursor.execute("CREATE TABLE player_names (player_id BIGINT PRIMARY KEY, full_name VARCHAR(100))")
-cursor.executemany("INSERT INTO player_names (player_id, full_name) VALUES (%s, %s)", data_names)
+# Create table if not exists with primary key
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS player_names (
+    player_id BIGINT PRIMARY KEY,
+    full_name VARCHAR(100)
+)
+""")
+cursor.executemany("""
+    INSERT INTO player_names (player_id, full_name)
+    VALUES (%s, %s)
+    ON DUPLICATE KEY UPDATE
+        full_name = VALUES(full_name)
+""", data_names)
 conn.commit()
 cursor.close()
 conn.close()
