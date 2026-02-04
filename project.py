@@ -113,7 +113,7 @@ CREATE TABLE IF NOT EXISTS statcast_2025 (
     pitcher_id BIGINT,
     park_hit_rate FLOAT,
     xBA FLOAT,
-    AB_id VARCHAR(255) PRIMARY KEY UNIQUE
+    AB_id VARCHAR(255) PRIMARY KEY
 )
 """)
 
@@ -179,7 +179,7 @@ CREATE TABLE IF NOT EXISTS expected_runs_2025 (
     expected_runs FLOAT,
     events VARCHAR(50),
     description VARCHAR(100),
-    AB_id VARCHAR(255) PRIMARY KEY UNIQUE,
+    AB_id VARCHAR(255) PRIMARY KEY,
     inning INT,
     park_run_factor FLOAT
 )
