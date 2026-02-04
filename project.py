@@ -99,7 +99,6 @@ xba_df = xba_df[xba_df['xBA'].notnull()]
 # Create xBA table if not exists
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS statcast_2025 (
-    id INT AUTO_INCREMENT PRIMARY KEY,
     unique_game_id VARCHAR(50),
     events VARCHAR(255),
     hit_distance_sc FLOAT,
@@ -114,7 +113,7 @@ CREATE TABLE IF NOT EXISTS statcast_2025 (
     pitcher_id BIGINT,
     park_hit_rate FLOAT,
     xBA FLOAT,
-    AB_id VARCHAR(255) UNIQUE
+    AB_id VARCHAR(255) PRIMARY KEY UNIQUE
 )
 """)
 
