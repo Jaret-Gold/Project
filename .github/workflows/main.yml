@@ -1,7 +1,7 @@
 name: Run Script
 on:
   schedule:
-    - cron: '*/15 * * * *' # Every 15 minutes
+    - cron: '*/5 * * * *' # Every 15 minutes
   workflow_dispatch:      # Allows you to click a "Run" button manually
 
 jobs:
