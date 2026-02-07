@@ -227,9 +227,8 @@ def main():
         xruns_df = xruns_df.merge(pd.read_sql("SELECT DISTINCT game_pk, venue_id FROM statcast_data", conn), on='game_pk', how='left')
         xruns_df = xruns_df.merge(park_factors, on='venue_id', how='left')
         xruns_df['park_run_factor'] = xruns_df['park_run_factor'].fillna(league_avg)
-        expected_runs_train = model_xruns.predict(train_df_xruns[features_xruns]).clip(0, 3.99)
-        scale = train_df_xruns['runs_scored'].mean() / expected_runs_train.mean()
         xruns_df['expected_runs_raw'] = model_xruns.predict(xruns_df[features_xruns]).clip(0, 3.99)
+        scale = xruns_df['runs_scored'].mean() / xruns_df['expected_runs_raw'].mean()
         xruns_df['expected_runs'] = xruns_df['expected_runs_raw'] * scale
 
         # Create xRuns table
