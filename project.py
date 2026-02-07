@@ -154,7 +154,7 @@ def main():
                 launch_speed = VALUES(launch_speed),
                 launch_angle = VALUES(launch_angle),
                 game_date = VALUES(game_date),
-                game_type = VALUES(game_type)               
+                game_type = VALUES(game_type),               
                 team_batting = VALUES(team_batting),
                 team_pitching = VALUES(team_pitching),
                 gameid = VALUES(gameid),
